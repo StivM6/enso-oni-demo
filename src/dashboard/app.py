@@ -1,10 +1,16 @@
 
 import streamlit as st
+import sys
+from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[2]  # sube 2 niveles: dashboard -> src -> raíz
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 from pages import login as login_page
 from pages import dashboard as dashboard_page
 from eda_enso import render_seccion_eda
-
+import sys
+from pathlib import Path
 st.set_page_config(
     page_title="Enso — SMART",
     layout="wide",
