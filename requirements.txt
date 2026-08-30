@@ -1,3 +1,9 @@
 streamlit
 plotly
 pandas
+streamlit
+pandas
+plotly
+geopandas
+folium
+streamlit-folium
