@@ -4,7 +4,9 @@ import folium
 import datetime
 
 import base64
+import unicodedata
 from pathlib import Path
+from indicadores_climaticos import render as render_indicadores
 
 _LOGO_PATH = Path(__file__).resolve().parents[1] / "assets" / "logo_enso.webp"
 
@@ -254,6 +256,29 @@ def _formatear_personas(n):
     return f"{n:,}".replace(",", ".")
 
 
+# Altura total (px) de la tarjeta Top 10 para que iguale al bloque del mapa.
+# Ajustar si cambia la altura del st_folium en render_mapa().
+ALTURA_BLOQUE_MAPA_PX = 860
+
+
+def _normalizar_nivel(nivel):
+    """'Alto', 'crítico', 'CRITICO' -> 'ALTO', 'CRITICO'. Desconocido -> 'MEDIO'."""
+    s = unicodedata.normalize("NFKD", str(nivel)).encode("ascii", "ignore").decode()
+    s = s.strip().upper()
+    return s if s in NIVEL_STYLES else "MEDIO"
+
+
+def _normalizar_irc(irc):
+    """Acepta IRC en escala 0-1 o 0-100 y devuelve un entero 0-100."""
+    try:
+        v = float(irc)
+    except (TypeError, ValueError):
+        return 0
+    if v <= 1:
+        v *= 100
+    return int(round(max(0, min(v, 100))))
+
+
 def _flecha_tendencia(trend):
     if trend == "up":
         return '<span style="color:#DC2626; font-size:10px; margin-left:2px;">▲</span>'
@@ -262,32 +287,88 @@ def _flecha_tendencia(trend):
     return ""
 
 
-def _render_top_zonas_riesgo():
+def _render_top_zonas_riesgo(altura_px=None):
     zonas = fetch_zonas_riesgo()
     if not zonas:
         zonas = zonas_riesgo_ejemplo
 
+    orden_niveles = ["CRITICO", "ALTO", "MEDIO", "BAJO"]
+    conteo = {n: 0 for n in orden_niveles}
+    total_personas = 0
+    suma_irc = 0
+
     filas_html = ""
     for i, z in enumerate(zonas):
-        rank = i + 1
-        style = NIVEL_STYLES.get(z["nivel"], NIVEL_STYLES["MEDIO"])
-        bg = "#ffffff" if i % 2 == 0 else "#f7f8fb"
+        nivel = _normalizar_nivel(z["nivel"])
+        irc = _normalizar_irc(z["irc"])
+        style = NIVEL_STYLES[nivel]
         flecha = _flecha_tendencia(z.get("trend"))
+        conteo[nivel] += 1
+        total_personas += int(z["personas"])
+        suma_irc += irc
 
         filas_html += (
-            f'<div class="riesgo-row" style="background:{bg};">'
-            f'<div class="riesgo-rank" style="color:{style["num"]};">{rank:02d}{flecha}</div>'
+            '<div class="riesgo-row">'
+            f'<div class="riesgo-rank" style="background:{style["badge_bg"]}; color:{style["badge_text"]};">{i + 1}</div>'
+            '<div class="riesgo-lugar">'
             f'<div class="riesgo-zona">{z["zona"]}</div>'
             f'<div class="riesgo-provincia">{z["provincia"]}</div>'
-            f'<div class="riesgo-irc-bar">'
-            f'<div class="riesgo-bar-track"><div class="riesgo-bar-fill" style="width:{z["irc"]}%; background:{style["bar"]};"></div></div>'
-            f'<span class="riesgo-irc-pct" style="color:{style["bar"]};">{z["irc"]}%</span>'
-            f'</div>'
-            f'<div class="riesgo-personas">{_formatear_personas(z["personas"])}</div>'
-            f'<div class="riesgo-nivel"><span class="riesgo-badge" style="background:{style["badge_bg"]}; color:{style["badge_text"]};">'
-            f'<span class="riesgo-dot" style="background:{style["dot"]};"></span>{z["nivel"]}</span></div>'
-            f'</div>'
+            '</div>'
+            '<div class="riesgo-irc">'
+            '<div class="riesgo-irc-top">'
+            '<span class="riesgo-irc-label">IRC</span>'
+            f'<span class="riesgo-irc-pct" style="color:{style["badge_text"]};">{irc}%{flecha}</span>'
+            '</div>'
+            f'<div class="riesgo-bar-track"><div class="riesgo-bar-fill" style="width:{irc}%; background:{style["bar"]};"></div></div>'
+            '</div>'
+            '<div class="riesgo-derecha">'
+            f'<span class="riesgo-badge" style="background:{style["badge_bg"]}; color:{style["badge_text"]};">'
+            f'<span class="riesgo-dot" style="background:{style["dot"]};"></span>{nivel}</span>'
+            f'<span class="riesgo-personas">{_formatear_personas(int(z["personas"]))} pers.</span>'
+            '</div>'
+            '</div>'
         )
+
+    n_zonas = len(zonas)
+    irc_promedio = round(suma_irc / n_zonas) if n_zonas else 0
+    color_criticas = NIVEL_STYLES["CRITICO"]["num"] if conteo["CRITICO"] else "#1e2942"
+
+    # Barra de distribución: un tramo por nivel, proporcional a la cantidad de zonas.
+    distribucion_html = "".join(
+        f'<div style="flex:{conteo[n]}; background:{NIVEL_STYLES[n]["bar"]};" '
+        f'title="{n}: {conteo[n]} zona(s)"></div>'
+        for n in orden_niveles if conteo[n]
+    )
+    leyenda_html = "".join(
+        f'<span class="riesgo-leyenda-item">'
+        f'<span class="riesgo-dot" style="background:{NIVEL_STYLES[n]["dot"]};"></span>'
+        f'{n}<b>{conteo[n]}</b></span>'
+        for n in orden_niveles
+    )
+
+    resumen_html = (
+        '<div class="riesgo-resumen">'
+        '<div class="riesgo-kpis">'
+        '<div class="riesgo-kpi">'
+        '<span class="riesgo-kpi-label">Personas expuestas</span>'
+        f'<span class="riesgo-kpi-num">{_formatear_personas(total_personas)}</span>'
+        '</div>'
+        '<div class="riesgo-kpi">'
+        '<span class="riesgo-kpi-label">Zonas críticas</span>'
+        f'<span class="riesgo-kpi-num" style="color:{color_criticas};">{conteo["CRITICO"]}'
+        f'<small> / {n_zonas}</small></span>'
+        '</div>'
+        '<div class="riesgo-kpi">'
+        '<span class="riesgo-kpi-label">IRC promedio</span>'
+        f'<span class="riesgo-kpi-num">{irc_promedio}%</span>'
+        '</div>'
+        '</div>'
+        f'<div class="riesgo-distribucion">{distribucion_html}</div>'
+        f'<div class="riesgo-leyenda">{leyenda_html}</div>'
+        '</div>'
+    )
+
+    altura_attr = f' style="height:{altura_px}px;"' if altura_px else ""
 
     html = """
         <style>
@@ -299,16 +380,16 @@ def _render_top_zonas_riesgo():
         overflow: hidden;
         font-family: sans-serif;
         margin-bottom: 20px;
+        display: flex;
+        flex-direction: column;
         }
         .riesgo-card-header {
         display: flex;
-        align-items: center;
-        justify-content: space-between;
+        flex-direction: column;
+        gap: 4px;
         padding: 12px 16px;
         border-bottom: 1px solid rgba(30,50,120,0.08);
         background: #f7f8fb;
-        flex-wrap: wrap;
-        gap: 8px;
         }
         .riesgo-card-title {
         display: flex;
@@ -319,57 +400,112 @@ def _render_top_zonas_riesgo():
         text-transform: uppercase;
         letter-spacing: 0.06em;
         color: #3a4a6e;
-        white-space: nowrap;
         }
         .riesgo-card-meta {
-        display: flex;
-        align-items: center;
-        gap: 10px;
         font-size: 11px;
         color: #8a93a8;
         }
-        .riesgo-vista-btn {
+        .riesgo-resumen {
+        padding: 14px 16px;
+        border-bottom: 1px solid rgba(30,50,120,0.08);
         display: flex;
-        align-items: center;
-        gap: 4px;
-        padding: 5px 10px;
-        border-radius: 8px;
-        border: 1px solid rgba(30,50,120,0.12);
-        background: #ffffff;
-        color: #3a4a6e;
-        font-size: 11px;
-        font-weight: 600;
-        white-space: nowrap;
+        flex-direction: column;
+        gap: 10px;
         }
-        .riesgo-col-headers {
+        .riesgo-kpis {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+        }
+        .riesgo-kpi {
         display: flex;
-        align-items: center;
-        gap: 12px;
-        padding: 8px 16px;
-        font-size: 10px;
+        flex-direction: column;
+        gap: 2px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: #f7f8fb;
+        }
+        .riesgo-kpi-label {
+        font-size: 9px;
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 0.06em;
         color: #9aa4ba;
-        border-bottom: 1px solid rgba(30,50,120,0.06);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        }
+        .riesgo-kpi-num {
+        font-size: 18px;
+        font-weight: 800;
+        color: #1e2942;
+        line-height: 1.2;
+        }
+        .riesgo-kpi-num small {
+        font-size: 12px;
+        font-weight: 600;
+        color: #9aa4ba;
+        }
+        .riesgo-distribucion {
+        display: flex;
+        gap: 2px;
+        height: 8px;
+        border-radius: 4px;
+        overflow: hidden;
+        background: rgba(30,50,120,0.08);
+        }
+        .riesgo-leyenda {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 14px;
+        }
+        .riesgo-leyenda-item {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        color: #5b6478;
+        }
+        .riesgo-leyenda-item b {
+        color: #1e2942;
+        margin-left: 2px;
+        }
+        .riesgo-body {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        overflow-y: auto;
         }
         .riesgo-row {
         display: flex;
         align-items: center;
         gap: 12px;
-        padding: 10px 16px;
+        padding: 12px 16px;
         border-bottom: 1px solid rgba(30,50,120,0.06);
+        flex: 1 1 auto;
+        max-height: 112px;
+        }
+        .riesgo-row:hover {
+        background: #f7f8fb;
         }
         .riesgo-rank {
-        width: 28px;
+        width: 26px;
+        height: 26px;
         flex-shrink: 0;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
         font-size: 12px;
-        font-weight: 700;
-        white-space: nowrap;
+        font-weight: 800;
+        }
+        .riesgo-lugar {
+        flex: 1.2;
+        min-width: 0;
         }
         .riesgo-zona {
-        width: 112px;
-        flex-shrink: 0;
         font-size: 13px;
         font-weight: 700;
         color: #1e2942;
@@ -378,25 +514,37 @@ def _render_top_zonas_riesgo():
         text-overflow: ellipsis;
         }
         .riesgo-provincia {
-        width: 110px;
-        flex-shrink: 0;
-        font-size: 12px;
-        font-weight: 500;
+        font-size: 11px;
         color: #6b8fd6;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
         }
-        .riesgo-irc-bar {
+        .riesgo-irc {
         flex: 1;
+        min-width: 70px;
         display: flex;
-        align-items: center;
-        gap: 8px;
-        min-width: 60px;
+        flex-direction: column;
+        gap: 5px;
+        }
+        .riesgo-irc-top {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        }
+        .riesgo-irc-label {
+        font-size: 9px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        color: #9aa4ba;
+        }
+        .riesgo-irc-pct {
+        font-size: 12px;
+        font-weight: 800;
+        white-space: nowrap;
         }
         .riesgo-bar-track {
-        flex: 1;
-        height: 5px;
+        height: 6px;
         border-radius: 3px;
         background: rgba(30,50,120,0.08);
         overflow: hidden;
@@ -405,32 +553,25 @@ def _render_top_zonas_riesgo():
         height: 100%;
         border-radius: 3px;
         }
-        .riesgo-irc-pct {
-        font-size: 12px;
-        font-weight: 700;
-        width: 32px;
-        text-align: right;
-        flex-shrink: 0;
-        }
-        .riesgo-personas {
-        width: 68px;
-        flex-shrink: 0;
-        text-align: right;
-        font-size: 12px;
-        font-weight: 600;
-        color: #5b6478;
-        }
-        .riesgo-nivel {
-        width: 92px;
+        .riesgo-derecha {
+        width: 84px;
         flex-shrink: 0;
         display: flex;
-        justify-content: flex-end;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 4px;
+        }
+        .riesgo-personas {
+        font-size: 11px;
+        font-weight: 600;
+        color: #5b6478;
+        white-space: nowrap;
         }
         .riesgo-badge {
         display: flex;
         align-items: center;
         gap: 5px;
-        padding: 3px 9px;
+        padding: 3px 8px;
         border-radius: 6px;
         font-size: 10px;
         font-weight: 700;
@@ -441,25 +582,17 @@ def _render_top_zonas_riesgo():
         height: 6px;
         border-radius: 50%;
         display: inline-block;
+        flex-shrink: 0;
         }
         </style>
-        <div class="riesgo-card">
+        <div class="riesgo-card"__ALTURA__>
         <div class="riesgo-card-header">
         <span class="riesgo-card-title">📈 Top 10 Zonas de Mayor Riesgo — Ecuador</span>
-        <div class="riesgo-card-meta">
-        <span>Índice de Riesgo Compuesto (IRC)</span>
-        <span class="riesgo-vista-btn">📍 Vista por Provincia</span>
+        <span class="riesgo-card-meta">Ordenadas por Índice de Riesgo Compuesto (IRC)</span>
         </div>
-        </div>
-        <div class="riesgo-col-headers">
-        <div style="width:28px;">#</div>
-        <div style="width:112px;">Zona</div>
-        <div style="width:110px;">Provincia</div>
-        <div style="flex:1;">Riesgo IRC</div>
-        <div style="width:68px; text-align:right;">Personas</div>
-        <div style="width:92px; text-align:right;">Nivel</div>
-        </div>
-        """ + filas_html + "</div>"
+        """
+    html = html.replace("__ALTURA__", altura_attr)
+    html += resumen_html + '<div class="riesgo-body">' + filas_html + '</div></div>'
 
     st.markdown(html, unsafe_allow_html=True)
 
@@ -610,18 +743,28 @@ def render():
 
     _inject_theme_css()
 
-    _render_header()
+    vista = _render_header() or "Dashboard"
+
+    if vista == "Por Provincia":
+        render_indicadores()
+        return
 
     _render_listas()
 
     _espaciador()
 
-    m = construir_mapa_manta()
-    agregar_observaciones_postgis(m)
-    render_mapa(map_obj=m)
+    # Mapa (60%) y Top 10 (40%) lado a lado.
+    # En pantallas angostas Streamlit apila las columnas automáticamente.
+    col_mapa, col_top = st.columns([3, 2], gap="medium")
+
+    with col_mapa:
+        m = construir_mapa_manta()
+        agregar_observaciones_postgis(m)
+        render_mapa(map_obj=m)
+
+    with col_top:
+        _render_top_zonas_riesgo(altura_px=ALTURA_BLOQUE_MAPA_PX)
 
     _espaciador()
-
-    _render_top_zonas_riesgo()
 
     render_seccion_eda()
